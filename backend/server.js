@@ -14,7 +14,11 @@ import fsPromises from "fs/promises";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-dotenv.config();
+dotenv.config({ path: path.resolve(__dirname, '.env') });
+
+if (!process.env.GEMINI_API_KEY) {
+  console.error('CRITICAL ERROR: GEMINI_API_KEY is not defined in process.env');
+}
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -60,18 +64,18 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
   let refImage = null;
 
   if (!templateId || !childName) {
-    if (photo) fs.unlinkSync(photo.path);
+    if (photo) await fsPromises.unlink(photo.path).catch(() => {});
     return res.status(400).json({ error: "Missing required fields (templateId, childName)" });
   }
 
   const template = templates.find((t) => t.id === templateId);
   if (!template) {
-    if (photo) fs.unlinkSync(photo.path);
+    if (photo) await fsPromises.unlink(photo.path).catch(() => {});
     return res.status(400).json({ error: "Invalid templateId" });
   }
 
   try {
-    const photoPath = photo && fs.existsSync(photo.path) ? photo.path : null;
+    const photoPath = photo ? photo.path : null;
     if (!photoPath) {
       throw new Error("No valid photo uploaded");
     }
@@ -198,7 +202,7 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
     res.send(Buffer.from(pdfBuffer));
 
   } catch (error) {
-    console.error("Error generating PDF:", error);
+    console.error('Runtime Failure Details:', error);
     if (!res.headersSent) {
       res.status(500).json({ error: "Internal server error", details: error.message });
     }
@@ -210,10 +214,15 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
       await deleteReferenceImage(refImage.name);
     }
     
-    if (photo && fs.existsSync(photo.path)) {
-      fs.unlinkSync(photo.path);
+    if (photo) {
+      await fsPromises.unlink(photo.path).catch(() => {});
     }
   }
+});
+
+app.use((err, req, res, next) => {
+  console.error('Runtime Failure Details:', err);
+  res.status(500).json({ error: "Internal server error", details: err.message });
 });
 
 app.listen(PORT, () => {
