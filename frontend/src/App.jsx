@@ -12,12 +12,13 @@ function App() {
   const [error, setError] = useState('');
   const [progress, setProgress] = useState(0);
   const fileInputRef = useRef(null);
+  const API_BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
   useEffect(() => {
     // Fetch templates on mount
     const fetchTemplates = async () => {
       try {
-        const response = await fetch('/api/templates');
+        const response = await fetch(`${API_BASE_URL}/api/templates`);
         if (response.ok) {
           const data = await response.json();
           setTemplates(data);
@@ -89,7 +90,7 @@ function App() {
       formData.append('templateId', selectedTemplateId);
       formData.append('childName', childName);
 
-      const response = await fetch('/api/generate-book', {
+      const response = await fetch(`${API_BASE_URL}/api/generate-book`, {
         method: 'POST',
         body: formData,
       });

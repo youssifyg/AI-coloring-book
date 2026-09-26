@@ -176,7 +176,10 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
 
     // Step 3: Render PDF using Puppeteer
     console.log("Launching Puppeteer...");
-    browser = await puppeteer.launch({ headless: "new" });
+    browser = await puppeteer.launch({
+      headless: true,
+      args: [ '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage' ]
+    });
     const page = await browser.newPage();
     
     // Set content and wait for load. Timeout increased to 90s for base64 strings.
