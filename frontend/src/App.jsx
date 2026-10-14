@@ -96,7 +96,14 @@ function App() {
       });
 
       if (!response.ok) {
-        throw new Error('فشل في إنشاء الكتاب. يرجى المحاولة مرة أخرى.');
+        let errorMsg = 'فشل في إنشاء الكتاب. يرجى المحاولة مرة أخرى.';
+        try {
+          const errData = await response.json();
+          if (errData && errData.error) {
+            errorMsg = errData.error;
+          }
+        } catch (_) {}
+        throw new Error(errorMsg);
       }
 
       const blob = await response.blob();

@@ -1,5 +1,13 @@
-node_modules/ 
+node_modules/
 .env
 backend/.env
-dist/ 
+dist/
 *.txt
+
+# Uploads and temporary assets
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# PDF generation and test artifacts
+*.pdf
+backend/dummy-test.jpg
