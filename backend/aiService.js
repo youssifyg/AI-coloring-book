@@ -52,7 +52,27 @@ export async function validateAndExtractCharacter(referenceFileUri, mimeType) {
         return response.text.trim();
     } catch (error) {
         console.error('Runtime Failure Details in validateAndExtractCharacter:', error);
-        throw new Error("API_QUOTA_OR_AUTH_FAILED: " + (error.message || error));
+        const errMsg = error.message || String(error);
+        const isQuotaOrAuth = 
+            error.status === 429 ||
+            error.status === 402 ||
+            error.status === 401 ||
+            error.status === 403 ||
+            errMsg.includes('429') ||
+            errMsg.includes('402') ||
+            errMsg.includes('401') ||
+            errMsg.includes('403') ||
+            errMsg.includes('RESOURCE_EXHAUSTED') ||
+            errMsg.includes('prepayment credits') ||
+            errMsg.includes('API_KEY_INVALID');
+
+        if (isQuotaOrAuth) {
+            const quotaError = new Error("API_QUOTA_OR_AUTH_FAILED: " + errMsg);
+            quotaError.status = error.status || 429;
+            throw quotaError;
+        }
+
+        throw error;
     }
 }
 

@@ -112,9 +112,30 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
       characterLockDescription = await validateAndExtractCharacter(refImage.uri, refImage.mimeType);
       console.log("Character Lock extracted:", characterLockDescription);
     } catch (preflightError) {
-      console.error("Runtime Failure Details (Pre-flight Quota/Auth):", preflightError);
-      return res.status(429).json({
-        error: "عفواً، رصيد الـ API غير كافٍ حالياً أو تم تجاوز الحد المسموح في Google Studio. لم يتم البدء في العملية.",
+      console.error("Runtime Failure Details (Pre-flight):", preflightError);
+      const isQuotaOrAuth = 
+        preflightError.status === 402 ||
+        preflightError.status === 429 ||
+        preflightError.status === 401 ||
+        preflightError.status === 403 ||
+        preflightError.message?.includes('402') || 
+        preflightError.message?.includes('429') || 
+        preflightError.message?.includes('401') || 
+        preflightError.message?.includes('403') || 
+        preflightError.message?.includes('RESOURCE_EXHAUSTED') || 
+        preflightError.message?.includes('prepayment credits') || 
+        preflightError.message?.includes('API_KEY_INVALID') ||
+        preflightError.message?.includes('API_QUOTA_OR_AUTH_FAILED');
+
+      if (isQuotaOrAuth) {
+        return res.status(429).json({
+          error: "عفواً، رصيد الـ API غير كافٍ حالياً أو تم تجاوز الحد المسموح في Google Studio. لم يتم البدء في العملية.",
+          details: preflightError.message
+        });
+      }
+
+      return res.status(500).json({
+        error: `فشل التحقق الأولي من الصورة: ${preflightError.message}`,
         details: preflightError.message
       });
     }
@@ -330,16 +351,22 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
       const isQuotaOrAuth = 
         error.status === 402 ||
         error.status === 429 ||
+        error.status === 401 ||
+        error.status === 403 ||
         error.message?.includes('402') || 
         error.message?.includes('429') || 
+        error.message?.includes('401') || 
+        error.message?.includes('403') || 
         error.message?.includes('RESOURCE_EXHAUSTED') || 
         error.message?.includes('depleted') ||
+        error.message?.includes('prepayment credits') || 
+        error.message?.includes('API_KEY_INVALID') ||
         error.message?.includes('API_QUOTA_OR_AUTH_FAILED');
 
       const statusCode = isQuotaOrAuth ? 429 : 500;
       const userMessage = isQuotaOrAuth
         ? "عفواً، رصيد الـ API غير كافٍ حالياً أو تم تجاوز الحد المسموح في Google Studio. لم يتم البدء في العملية."
-        : "فشل في إنشاء كتاب التلوين. يرجى التحقق من الرصيد أو المحاولة لاحقاً.";
+        : `فشل في إنشاء كتاب التلوين: ${error.message}`;
 
       res.status(statusCode).json({ error: userMessage, details: error.message });
     }
