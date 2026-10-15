@@ -42,6 +42,34 @@ if (fs.existsSync(cairoFontPath)) {
   cairoFontBase64 = fs.readFileSync(cairoFontPath).toString("base64");
 }
 
+function getMockImageBase64(templateId, index, isCover = false) {
+  const templatesDir = path.join(__dirname, "templates");
+  let candidate = null;
+  if (!isCover) {
+    candidate = path.join(templatesDir, `${templateId}_${index + 1}.png`);
+  }
+  if (!candidate || !fs.existsSync(candidate)) {
+    if (fs.existsSync(templatesDir)) {
+      const prefixFiles = fs.readdirSync(templatesDir).filter(f => f.startsWith(templateId) && f.endsWith('.png'));
+      if (prefixFiles.length > 0) {
+        candidate = path.join(templatesDir, prefixFiles[index % prefixFiles.length]);
+      } else {
+        const allPngs = fs.readdirSync(templatesDir).filter(f => f.endsWith('.png'));
+        if (allPngs.length > 0) {
+          candidate = path.join(templatesDir, allPngs[index % allPngs.length]);
+        }
+      }
+    }
+  }
+
+  if (candidate && fs.existsSync(candidate)) {
+    const data = fs.readFileSync(candidate).toString("base64");
+    return `data:image/png;base64,${data}`;
+  }
+
+  return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -81,6 +109,7 @@ app.get("/api/templates", (req, res) => {
 
 app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
   const { templateId, childName } = req.body;
+  const isMock = req.query.mock === 'true' || req.body.mock === 'true' || req.body.mock === true;
   const photo = req.file;
   let browser;
   let refImage = null;
@@ -98,81 +127,101 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
 
   try {
     const photoPath = photo ? photo.path : null;
-    if (!photoPath) {
+    if (!photoPath && !isMock) {
       throw new Error("No valid photo uploaded");
     }
-    
-    console.log("Uploading reference image once to AI Studio...");
-    refImage = await uploadReferenceImage(photoPath);
 
-    // Pre-flight check & Character Lock
-    let characterLockDescription = "";
-    try {
-      console.log("Validating API quota and extracting character lock...");
-      characterLockDescription = await validateAndExtractCharacter(refImage.uri, refImage.mimeType);
-      console.log("Character Lock extracted:", characterLockDescription);
-    } catch (preflightError) {
-      console.error("Runtime Failure Details (Pre-flight):", preflightError);
-      const isQuotaOrAuth = 
-        preflightError.status === 402 ||
-        preflightError.status === 429 ||
-        preflightError.status === 401 ||
-        preflightError.status === 403 ||
-        preflightError.message?.includes('402') || 
-        preflightError.message?.includes('429') || 
-        preflightError.message?.includes('401') || 
-        preflightError.message?.includes('403') || 
-        preflightError.message?.includes('RESOURCE_EXHAUSTED') || 
-        preflightError.message?.includes('prepayment credits') || 
-        preflightError.message?.includes('API_KEY_INVALID') ||
-        preflightError.message?.includes('API_QUOTA_OR_AUTH_FAILED');
+    let coverImageUri = "";
+    const sceneResults = [];
 
-      if (isQuotaOrAuth) {
-        return res.status(429).json({
-          error: "عفواً، رصيد الـ API غير كافٍ حالياً أو تم تجاوز الحد المسموح في Google Studio. لم يتم البدء في العملية.",
+    if (isMock) {
+      console.log("⚡ MOCK MODE ACTIVE: Bypassing Gemini API (Zero API calls, Zero credit usage)...");
+      coverImageUri = getMockImageBase64(template.id, 0, true);
+      for (let i = 0; i < template.scenes.length; i++) {
+        sceneResults.push({
+          caption: template.scenes[i].text,
+          imageUri: getMockImageBase64(template.id, i, false)
+        });
+      }
+    } else {
+      console.log("Uploading reference image once to AI Studio...");
+      refImage = await uploadReferenceImage(photoPath);
+
+      // Pre-flight check & Character Lock
+      let characterLockDescription = "";
+      try {
+        console.log("Validating API quota and extracting character lock...");
+        characterLockDescription = await validateAndExtractCharacter(refImage.uri, refImage.mimeType);
+        console.log("Character Lock extracted:", characterLockDescription);
+      } catch (preflightError) {
+        console.error("Runtime Failure Details (Pre-flight):", preflightError);
+        const isQuotaOrAuth = 
+          preflightError.status === 402 ||
+          preflightError.status === 429 ||
+          preflightError.status === 401 ||
+          preflightError.status === 403 ||
+          preflightError.message?.includes('402') || 
+          preflightError.message?.includes('429') || 
+          preflightError.message?.includes('401') || 
+          preflightError.message?.includes('403') || 
+          preflightError.message?.includes('RESOURCE_EXHAUSTED') || 
+          preflightError.message?.includes('prepayment credits') || 
+          preflightError.message?.includes('API_KEY_INVALID') ||
+          preflightError.message?.includes('API_QUOTA_OR_AUTH_FAILED');
+
+        if (isQuotaOrAuth) {
+          return res.status(429).json({
+            error: "عفواً، رصيد الـ API غير كافٍ حالياً أو تم تجاوز الحد المسموح في Google Studio. لم يتم البدء في العملية.",
+            details: preflightError.message
+          });
+        }
+
+        return res.status(500).json({
+          error: `فشل التحقق الأولي من الصورة: ${preflightError.message}`,
           details: preflightError.message
         });
       }
 
-      return res.status(500).json({
-        error: `فشل التحقق الأولي من الصورة: ${preflightError.message}`,
-        details: preflightError.message
-      });
-    }
-
-    // Step 1: Generate Full-Color Cover Image
-    console.log("Generating full-color cover image...");
-    const coverImageUri = await generateCoverImage(
-      template.coverPrompt || template.description,
-      refImage.uri,
-      refImage.mimeType,
-      characterLockDescription
-    );
-    await new Promise(resolve => setTimeout(resolve, 2500));
-
-    // Step 2: Generate Coloring Scenes
-    console.log("Generating coloring scenes via Interactions API...");
-    const sceneResults = [];
-    
-    for (let i = 0; i < template.scenes.length; i++) {
-      const scene = template.scenes[i];
-      console.log(`Generating scene ${i + 1}/${template.scenes.length}: ${scene.prompt}...`);
-      
-      const base64Img = await generateSceneImage(
-        scene.prompt,
+      // Step 1: Generate Full-Color Cover Image
+      console.log("Generating full-color cover image...");
+      coverImageUri = await generateCoverImage(
+        template.coverPrompt || template.description,
         refImage.uri,
         refImage.mimeType,
         characterLockDescription
       );
-      
-      sceneResults.push({
-        caption: scene.text,
-        imageUri: base64Img
-      });
-      
-      // 2.5 second delay to respect API rate limits
-      if (i < template.scenes.length - 1) {
-        await new Promise(resolve => setTimeout(resolve, 2500));
+      await new Promise(resolve => setTimeout(resolve, 500));
+
+      // Step 2: Generate Coloring Scenes in controlled batches of 2
+      console.log("Generating coloring scenes in controlled batches of 2...");
+      const chunkSize = 2;
+      for (let i = 0; i < template.scenes.length; i += chunkSize) {
+        const chunk = template.scenes.slice(i, i + chunkSize);
+        console.log(`Processing batch ${Math.floor(i / chunkSize) + 1}/${Math.ceil(template.scenes.length / chunkSize)} (scenes ${i + 1}-${Math.min(i + chunkSize, template.scenes.length)})...`);
+        
+        const chunkResults = await Promise.all(
+          chunk.map(async (scene, chunkIdx) => {
+            const globalIdx = i + chunkIdx;
+            console.log(`Generating scene ${globalIdx + 1}/${template.scenes.length}: ${scene.prompt}...`);
+            const base64Img = await generateSceneImage(
+              scene.prompt,
+              refImage.uri,
+              refImage.mimeType,
+              characterLockDescription
+            );
+            return {
+              caption: scene.text,
+              imageUri: base64Img
+            };
+          })
+        );
+
+        sceneResults.push(...chunkResults);
+
+        // 500ms delay between batches to respect rate limits while avoiding timeouts
+        if (i + chunkSize < template.scenes.length) {
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
       }
     }
 
@@ -319,20 +368,27 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
       </html>
     `;
 
-    // Step 4: Render PDF using Puppeteer
-    console.log("Launching Puppeteer...");
+    // Step 4: Render PDF using Puppeteer with memory-safe flags for Render Linux
+    console.log("Launching Puppeteer with memory-safe Linux flags...");
     browser = await puppeteer.launch({
       headless: true,
-      args: [ '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage' ]
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--disable-extensions'
+      ]
     });
     const page = await browser.newPage();
     
-    // Set high resolution viewport (150-300 DPI equivalent) for print sharpness
-    await page.setViewport({ width: 1240, height: 1754, deviceScaleFactor: 2 });
+    // Set viewport with deviceScaleFactor 1 to stay comfortably within Render's 512MB RAM ceiling
+    await page.setViewport({ width: 1240, height: 1754, deviceScaleFactor: 1 });
     
     // Set content and wait for load. Timeout increased to 90s for base64 strings.
     await page.setContent(htmlContent, { waitUntil: 'load', timeout: 90000 });
-    await new Promise(resolve => setTimeout(resolve, 2000)); // let images paint
+    await new Promise(resolve => setTimeout(resolve, 1500)); // let images paint
     
     console.log("Generating PDF stream...");
     const pdfBuffer = await page.pdf({

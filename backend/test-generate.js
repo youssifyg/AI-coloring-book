@@ -63,10 +63,12 @@ try {
   console.error(`   ❌ Templates failed: ${err.message}\n`);
 }
 
-// Test 3: PDF generation
-console.log('3. Testing POST /api/generate-book (Arabic name + space theme)...');
+// Test 3: PDF generation (Mock Mode - Zero API Credits)
+console.log('3. Testing POST /api/generate-book?mock=true (Arabic name + space theme)...');
 try {
-  const response = await fetch('http://localhost:5000/api/generate-book', {
+  const targetUrl = process.env.TARGET_URL || 'http://localhost:5000/api/generate-book?mock=true';
+  console.log(`   Target URL: ${targetUrl}`);
+  const response = await fetch(targetUrl, {
     method: 'POST',
     headers: {
       'Content-Type': `multipart/form-data; boundary=${boundary}`,
