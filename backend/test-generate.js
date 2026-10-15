@@ -103,5 +103,9 @@ try {
 if (fs.existsSync(dummyImagePath)) {
   fs.unlinkSync(dummyImagePath);
 }
+const outputPath = path.join(__dirname, 'test-output.pdf');
+if (fs.existsSync(outputPath)) {
+  fs.unlinkSync(outputPath);
+}
 
 console.log('=== All tests complete ===');

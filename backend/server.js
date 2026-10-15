@@ -74,6 +74,98 @@ function getMockImageBase64(templateId, index, isCover = false) {
   return "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 }
 
+let cachedChromeExecutable = null;
+
+async function resolveChromeExecutable() {
+  if (cachedChromeExecutable && fs.existsSync(cachedChromeExecutable)) {
+    return cachedChromeExecutable;
+  }
+
+  // 1. Explicit environment variable
+  if (process.env.PUPPETEER_EXECUTABLE_PATH && fs.existsSync(process.env.PUPPETEER_EXECUTABLE_PATH)) {
+    cachedChromeExecutable = process.env.PUPPETEER_EXECUTABLE_PATH;
+    return cachedChromeExecutable;
+  }
+
+  // 2. Common Linux system binaries
+  const linuxCandidates = [
+    '/usr/bin/google-chrome-stable',
+    '/usr/bin/google-chrome',
+    '/usr/bin/chromium-browser',
+    '/usr/bin/chromium'
+  ];
+  for (const candidate of linuxCandidates) {
+    if (fs.existsSync(candidate)) {
+      cachedChromeExecutable = candidate;
+      return cachedChromeExecutable;
+    }
+  }
+
+  // 3. Common Windows system binaries
+  const winCandidates = [
+    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe'
+  ];
+  for (const candidate of winCandidates) {
+    if (fs.existsSync(candidate)) {
+      cachedChromeExecutable = candidate;
+      return cachedChromeExecutable;
+    }
+  }
+
+  // 4. Puppeteer cache directories (.cache/puppeteer in project, root, or user home)
+  const cacheDirs = [
+    path.join(__dirname, '.cache', 'puppeteer'),
+    path.join(path.dirname(__dirname), '.cache', 'puppeteer'),
+    path.join(process.env.HOME || process.env.USERPROFILE || '', '.cache', 'puppeteer')
+  ];
+  for (const cacheDir of cacheDirs) {
+    if (fs.existsSync(cacheDir)) {
+      const findExecutable = (dir, depth = 0) => {
+        if (depth > 4) return null;
+        try {
+          const entries = fs.readdirSync(dir, { withFileTypes: true });
+          for (const entry of entries) {
+            const full = path.join(dir, entry.name);
+            if (entry.isDirectory()) {
+              const found = findExecutable(full, depth + 1);
+              if (found) return found;
+            } else if (
+              entry.name === 'chrome' ||
+              entry.name === 'chrome.exe' ||
+              entry.name === 'chromium'
+            ) {
+              return full;
+            }
+          }
+        } catch {
+          return null;
+        }
+        return null;
+      };
+      const found = findExecutable(cacheDir);
+      if (found) {
+        cachedChromeExecutable = found;
+        return cachedChromeExecutable;
+      }
+    }
+  }
+
+  // 5. Puppeteer default executablePath()
+  try {
+    const defaultPath = await puppeteer.executablePath();
+    if (defaultPath && fs.existsSync(defaultPath)) {
+      cachedChromeExecutable = defaultPath;
+      return cachedChromeExecutable;
+    }
+  } catch (err) {
+    // Puppeteer throws if not installed in default path
+  }
+
+  return null;
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -130,6 +222,14 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
   }
 
   try {
+    // Pre-flight check: Verify Puppeteer Chrome binary exists BEFORE any Gemini API calls
+    const chromeExecutable = await resolveChromeExecutable();
+    if (!chromeExecutable) {
+      console.error("CRITICAL: PDF Engine Chrome binary not found on server before initiating generation.");
+      if (photo) await fsPromises.unlink(photo.path).catch(() => {});
+      return res.status(500).json({ error: "PDF Engine Chrome binary not found on server" });
+    }
+
     const photoPath = photo ? photo.path : null;
     if (!photoPath && !isMock) {
       throw new Error("No valid photo uploaded");
@@ -373,15 +473,11 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
     `;
 
     // Step 4: Render PDF using Puppeteer with memory-safe flags for Render Linux
-    console.log("Launching Puppeteer with memory-safe Linux flags...");
-    const possibleExecutable = process.env.PUPPETEER_EXECUTABLE_PATH || 
-      (fs.existsSync('/usr/bin/google-chrome-stable') ? '/usr/bin/google-chrome-stable' : 
-      (fs.existsSync('/usr/bin/chromium-browser') ? '/usr/bin/chromium-browser' : 
-      (fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined)));
+    console.log("Launching Puppeteer with verified Chrome executable:", chromeExecutable);
 
     browser = await puppeteer.launch({
       headless: true,
-      ...(possibleExecutable ? { executablePath: possibleExecutable } : {}),
+      executablePath: chromeExecutable,
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -455,6 +551,12 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: "Internal server error", details: err.message });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, async () => {
   console.log(`Server listening on port ${PORT}`);
+  const verifiedChrome = await resolveChromeExecutable();
+  if (verifiedChrome) {
+    console.log(`✅ Pre-flight check: Chrome binary verified at: ${verifiedChrome}`);
+  } else {
+    console.warn(`⚠️ Pre-flight check: Chrome binary not found. Book generation will abort before calling Gemini if missing.`);
+  }
 });

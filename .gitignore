@@ -10,6 +10,7 @@ backend/uploads/*
 
 # PDF generation and test artifacts
 *.pdf
+backend/test-output.pdf
 backend/dummy-test.jpg
 .cache/
 backend/.cache/
