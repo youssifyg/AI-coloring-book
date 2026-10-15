@@ -26,6 +26,10 @@ if (!process.env.GEMINI_API_KEY) {
   console.error('CRITICAL ERROR: GEMINI_API_KEY is not defined in process.env');
 }
 
+if (!process.env.PUPPETEER_CACHE_DIR) {
+  process.env.PUPPETEER_CACHE_DIR = path.join(__dirname, '.cache', 'puppeteer');
+}
+
 function escapeHtml(str) {
   if (!str) return "";
   return String(str)
@@ -370,8 +374,14 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
 
     // Step 4: Render PDF using Puppeteer with memory-safe flags for Render Linux
     console.log("Launching Puppeteer with memory-safe Linux flags...");
+    const possibleExecutable = process.env.PUPPETEER_EXECUTABLE_PATH || 
+      (fs.existsSync('/usr/bin/google-chrome-stable') ? '/usr/bin/google-chrome-stable' : 
+      (fs.existsSync('/usr/bin/chromium-browser') ? '/usr/bin/chromium-browser' : 
+      (fs.existsSync('/usr/bin/chromium') ? '/usr/bin/chromium' : undefined)));
+
     browser = await puppeteer.launch({
       headless: true,
+      ...(possibleExecutable ? { executablePath: possibleExecutable } : {}),
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',

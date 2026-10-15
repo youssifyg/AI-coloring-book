@@ -5,6 +5,7 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node --watch server.js",
+    "build": "puppeteer browsers install chrome",
     "postinstall": "puppeteer browsers install chrome"
   },
   "dependencies": {
