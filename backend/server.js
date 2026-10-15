@@ -166,6 +166,69 @@ async function resolveChromeExecutable() {
   return null;
 }
 
+// Persistent generation cache for crash/quota recovery
+const GENERATIONS_CACHE_DIR = path.join(__dirname, '.cache', 'generations');
+if (!fs.existsSync(GENERATIONS_CACHE_DIR)) {
+  fs.mkdirSync(GENERATIONS_CACHE_DIR, { recursive: true });
+}
+
+function getGenerationCacheFilePath(childName, templateId) {
+  const safeName = (childName || '').trim().replace(/[\\/:*?"<>|]/g, '_');
+  const safeTemplate = (templateId || '').trim().replace(/[\\/:*?"<>|]/g, '_');
+  return path.join(GENERATIONS_CACHE_DIR, `${safeName}_${safeTemplate}.json`);
+}
+
+function loadGenerationCache(childName, templateId) {
+  try {
+    const filePath = getGenerationCacheFilePath(childName, templateId);
+    if (fs.existsSync(filePath)) {
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const data = JSON.parse(raw);
+      if (Date.now() - (data.updatedAt || 0) < 24 * 60 * 60 * 1000) {
+        console.log(`⚡ [Cache] Found valid persistent checkpoint for "${childName}" (${templateId})`);
+        return data;
+      } else {
+        console.log(`[Cache] Checkpoint expired (>24h), removing.`);
+        fs.unlinkSync(filePath);
+      }
+    }
+  } catch (err) {
+    console.warn(`[Cache] Failed to load checkpoint:`, err.message);
+  }
+  return {
+    childName,
+    templateId,
+    characterLockDescription: null,
+    coverImageUri: null,
+    scenes: {},
+    updatedAt: Date.now()
+  };
+}
+
+function saveGenerationCache(childName, templateId, cacheData) {
+  try {
+    const filePath = getGenerationCacheFilePath(childName, templateId);
+    cacheData.updatedAt = Date.now();
+    fs.writeFileSync(filePath, JSON.stringify(cacheData), 'utf-8');
+    const cachedCount = Object.keys(cacheData.scenes || {}).length;
+    console.log(`💾 [Cache] Checkpoint saved: ${path.basename(filePath)} (Scenes cached: ${cachedCount}/10, Cover: ${cacheData.coverImageUri ? 'YES' : 'NO'})`);
+  } catch (err) {
+    console.warn(`[Cache] Failed to save checkpoint:`, err.message);
+  }
+}
+
+function clearGenerationCache(childName, templateId) {
+  try {
+    const filePath = getGenerationCacheFilePath(childName, templateId);
+    if (fs.existsSync(filePath)) {
+      fs.unlinkSync(filePath);
+      console.log(`🧹 [Cache] Generation completed and PDF sent. Checkpoint cleared: ${path.basename(filePath)}`);
+    }
+  } catch (err) {
+    console.warn(`[Cache] Failed to clear checkpoint:`, err.message);
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 5000;
 
@@ -248,83 +311,131 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
         });
       }
     } else {
-      console.log("Uploading reference image once to AI Studio...");
-      refImage = await uploadReferenceImage(photoPath);
+      // 1. Load persistent checkpoint cache for child and template
+      const cache = loadGenerationCache(childName, template.id);
+
+      // Determine what has already been generated
+      let characterLockDescription = cache.characterLockDescription || "";
+      const needsCover = !cache.coverImageUri;
+
+      // Identify missing scenes
+      const missingSceneIndices = [];
+      for (let i = 0; i < template.scenes.length; i++) {
+        if (!cache.scenes || !cache.scenes[i] || !cache.scenes[i].imageUri) {
+          missingSceneIndices.push(i);
+        }
+      }
+
+      const needsAI = !characterLockDescription || needsCover || missingSceneIndices.length > 0;
+
+      if (needsAI) {
+        console.log("Uploading reference image once to AI Studio...");
+        refImage = await uploadReferenceImage(photoPath);
+      }
 
       // Pre-flight check & Character Lock
-      let characterLockDescription = "";
-      try {
-        console.log("Validating API quota and extracting character lock...");
-        characterLockDescription = await validateAndExtractCharacter(refImage.uri, refImage.mimeType);
-        console.log("Character Lock extracted:", characterLockDescription);
-      } catch (preflightError) {
-        console.error("Runtime Failure Details (Pre-flight):", preflightError);
-        const isQuotaOrAuth = 
-          preflightError.status === 402 ||
-          preflightError.status === 429 ||
-          preflightError.status === 401 ||
-          preflightError.status === 403 ||
-          preflightError.message?.includes('402') || 
-          preflightError.message?.includes('429') || 
-          preflightError.message?.includes('401') || 
-          preflightError.message?.includes('403') || 
-          preflightError.message?.includes('RESOURCE_EXHAUSTED') || 
-          preflightError.message?.includes('prepayment credits') || 
-          preflightError.message?.includes('API_KEY_INVALID') ||
-          preflightError.message?.includes('API_QUOTA_OR_AUTH_FAILED');
+      if (characterLockDescription) {
+        console.log("⚡ Resuming from checkpoint: Reusing character lock description.");
+      } else {
+        try {
+          console.log("Validating API quota and extracting character lock...");
+          characterLockDescription = await validateAndExtractCharacter(refImage.uri, refImage.mimeType);
+          console.log("Character Lock extracted:", characterLockDescription);
+          cache.characterLockDescription = characterLockDescription;
+          saveGenerationCache(childName, template.id, cache);
+        } catch (preflightError) {
+          console.error("Runtime Failure Details (Pre-flight):", preflightError);
+          const isQuotaOrAuth = 
+            preflightError.status === 402 ||
+            preflightError.status === 429 ||
+            preflightError.status === 401 ||
+            preflightError.status === 403 ||
+            preflightError.message?.includes('402') || 
+            preflightError.message?.includes('429') || 
+            preflightError.message?.includes('401') || 
+            preflightError.message?.includes('403') || 
+            preflightError.message?.includes('RESOURCE_EXHAUSTED') || 
+            preflightError.message?.includes('prepayment credits') || 
+            preflightError.message?.includes('API_KEY_INVALID') ||
+            preflightError.message?.includes('API_QUOTA_OR_AUTH_FAILED');
 
-        if (isQuotaOrAuth) {
-          return res.status(429).json({
-            error: "عفواً، رصيد الـ API غير كافٍ حالياً أو تم تجاوز الحد المسموح في Google Studio. لم يتم البدء في العملية.",
+          if (isQuotaOrAuth) {
+            return res.status(429).json({
+              error: "عفواً، رصيد الـ API غير كافٍ حالياً أو تم تجاوز الحد المسموح في Google Studio. لم يتم البدء في العملية.",
+              details: preflightError.message
+            });
+          }
+
+          return res.status(500).json({
+            error: `فشل التحقق الأولي من الصورة: ${preflightError.message}`,
             details: preflightError.message
           });
         }
-
-        return res.status(500).json({
-          error: `فشل التحقق الأولي من الصورة: ${preflightError.message}`,
-          details: preflightError.message
-        });
       }
 
-      // Step 1: Generate Full-Color Cover Image
-      console.log("Generating full-color cover image...");
-      coverImageUri = await generateCoverImage(
-        template.coverPrompt || template.description,
-        refImage.uri,
-        refImage.mimeType,
-        characterLockDescription
-      );
-      await new Promise(resolve => setTimeout(resolve, 500));
-
-      // Step 2: Generate Coloring Scenes in controlled batches of 2
-      console.log("Generating coloring scenes in controlled batches of 2...");
-      const chunkSize = 2;
-      for (let i = 0; i < template.scenes.length; i += chunkSize) {
-        const chunk = template.scenes.slice(i, i + chunkSize);
-        console.log(`Processing batch ${Math.floor(i / chunkSize) + 1}/${Math.ceil(template.scenes.length / chunkSize)} (scenes ${i + 1}-${Math.min(i + chunkSize, template.scenes.length)})...`);
-        
-        const chunkResults = await Promise.all(
-          chunk.map(async (scene, chunkIdx) => {
-            const globalIdx = i + chunkIdx;
-            console.log(`Generating scene ${globalIdx + 1}/${template.scenes.length}: ${scene.prompt}...`);
-            const base64Img = await generateSceneImage(
-              scene.prompt,
-              refImage.uri,
-              refImage.mimeType,
-              characterLockDescription
-            );
-            return {
-              caption: scene.text,
-              imageUri: base64Img
-            };
-          })
+      // Step 1: Generate or reuse Full-Color Cover Image
+      if (cache.coverImageUri) {
+        console.log("⚡ Resuming from checkpoint: Reusing cached full-color cover image.");
+        coverImageUri = cache.coverImageUri;
+      } else {
+        console.log("Generating full-color cover image...");
+        coverImageUri = await generateCoverImage(
+          template.coverPrompt || template.description,
+          refImage.uri,
+          refImage.mimeType,
+          characterLockDescription
         );
+        cache.coverImageUri = coverImageUri;
+        saveGenerationCache(childName, template.id, cache);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
 
-        sceneResults.push(...chunkResults);
+      // Step 2: Assemble scenes (cached + freshly generated)
+      for (let i = 0; i < template.scenes.length; i++) {
+        if (cache.scenes && cache.scenes[i] && cache.scenes[i].imageUri) {
+          console.log(`⚡ Resuming from checkpoint: Scene ${i + 1}/${template.scenes.length} already generated.`);
+          sceneResults[i] = cache.scenes[i];
+        }
+      }
 
-        // 500ms delay between batches to respect rate limits while avoiding timeouts
-        if (i + chunkSize < template.scenes.length) {
-          await new Promise(resolve => setTimeout(resolve, 500));
+      // Generate missing scenes in batches of 2
+      if (missingSceneIndices.length > 0) {
+        console.log(`Generating ${missingSceneIndices.length} missing coloring scenes in controlled batches of 2...`);
+        const chunkSize = 2;
+        for (let i = 0; i < missingSceneIndices.length; i += chunkSize) {
+          const batchIndices = missingSceneIndices.slice(i, i + chunkSize);
+          console.log(`Processing batch ${Math.floor(i / chunkSize) + 1}/${Math.ceil(missingSceneIndices.length / chunkSize)} (scenes: ${batchIndices.map(idx => idx + 1).join(', ')})...`);
+
+          const batchResults = await Promise.all(
+            batchIndices.map(async (sceneIdx) => {
+              const scene = template.scenes[sceneIdx];
+              console.log(`Generating scene ${sceneIdx + 1}/${template.scenes.length}: ${scene.prompt}...`);
+              const base64Img = await generateSceneImage(
+                scene.prompt,
+                refImage.uri,
+                refImage.mimeType,
+                characterLockDescription
+              );
+              const item = {
+                caption: scene.text,
+                imageUri: base64Img
+              };
+              // Immediately save each scene as it succeeds
+              cache.scenes = cache.scenes || {};
+              cache.scenes[sceneIdx] = item;
+              saveGenerationCache(childName, template.id, cache);
+              return { sceneIdx, item };
+            })
+          );
+
+          for (const resItem of batchResults) {
+            sceneResults[resItem.sceneIdx] = resItem.item;
+          }
+
+          // 500ms delay between batches to respect rate limits while avoiding timeouts
+          if (i + chunkSize < missingSceneIndices.length) {
+            await new Promise(resolve => setTimeout(resolve, 500));
+          }
         }
       }
     }
@@ -507,6 +618,11 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
     res.setHeader("Content-Disposition", `attachment; filename=coloring-book.pdf`);
     res.send(Buffer.from(pdfBuffer));
 
+    // Clear persistent cache checkpoint only after full PDF is successfully sent
+    if (!isMock) {
+      clearGenerationCache(childName, template.id);
+    }
+
   } catch (error) {
     console.error('Runtime Failure Details:', error);
     if (!res.headersSent) {
@@ -527,7 +643,7 @@ app.post("/api/generate-book", upload.single("photo"), async (req, res) => {
 
       const statusCode = isQuotaOrAuth ? 429 : 500;
       const userMessage = isQuotaOrAuth
-        ? "عفواً، رصيد الـ API غير كافٍ حالياً أو تم تجاوز الحد المسموح في Google Studio. لم يتم البدء في العملية."
+        ? "عفواً، رصيد الـ API غير كافٍ حالياً أو تم تجاوز الحد المسموح في Google Studio. تم حفظ ما تم إنشاؤه حتى الآن، يمكنك شحن الرصيد وإعادة المحاولة لاستكمال باقي الصفحات تلقائياً دون إعادة إنشائها."
         : `فشل في إنشاء كتاب التلوين: ${error.message}`;
 
       res.status(statusCode).json({ error: userMessage, details: error.message });

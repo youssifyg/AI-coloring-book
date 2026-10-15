@@ -90,6 +90,35 @@ export async function withRetry(fn, maxRetries = 3) {
         } catch (error) {
             lastError = error;
             console.error(`Runtime Failure Details (Attempt ${attempt}/${maxRetries}):`, error.message || error);
+
+            const errMsg = (
+                (error.message || '') + ' ' +
+                (error.statusText || '') + ' ' +
+                (error.details || '') + ' ' +
+                String(error)
+            ).toLowerCase();
+
+            const isNonRetryable = 
+                error.status === 402 ||
+                error.status === 429 ||
+                error.status === 401 ||
+                error.status === 403 ||
+                errMsg.includes('402') || 
+                errMsg.includes('429') || 
+                errMsg.includes('401') || 
+                errMsg.includes('403') || 
+                errMsg.includes('resource_exhausted') || 
+                errMsg.includes('prepayment credits') || 
+                errMsg.includes('depleted') ||
+                errMsg.includes('quota') ||
+                errMsg.includes('api_quota_or_auth_failed') ||
+                errMsg.includes('api_key_invalid');
+
+            if (isNonRetryable) {
+                console.warn(`[withRetry] Fatal non-retryable error detected (${error.status || 'quota/credit exhaustion'}). Aborting immediately without retry.`);
+                throw error;
+            }
+
             if (attempt < maxRetries) {
                 const delayMs = delays[attempt - 1] || 10000;
                 console.log(`Waiting ${delayMs}ms before retry attempt ${attempt + 1}...`);

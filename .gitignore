@@ -14,3 +14,5 @@ backend/test-output.pdf
 backend/dummy-test.jpg
 .cache/
 backend/.cache/
+backend/.cache/generations/
+.cache/generations/
